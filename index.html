@@ -688,77 +688,62 @@
 </div>
 
 <script>
-// ─── IMGUR MEME ENGINE ────────────────────────────────────────────────────────
-// Imgur'un halka açık subreddit galeri API'si kullanılıyor.
-// Imgur, Reddit meme'lerini mirror'lar — URL'ler her yerden yüklenir (hotlink yok).
-// Client ID: ücretsiz, kayıtsız kullanılabilir (rate limit: 12500/gün)
+// ─── BURDURLAND REDDIT ENGINE ─────────────────────────────────────────────────
+// Sadece r/burdurland — Reddit'in herkese açık JSON API'si kullanılıyor.
+// Flair filtresi: "konu dışı", "porçay", "fan art" gösterilmez.
 
-const IMGUR_CLIENT_ID = "546c25a59c58ad7"; // Imgur public demo client ID
+const IMAGE_EXTS = /\.(jpg|jpeg|png|gif|mp4|gifv|webp)(\?.*)?$/i;
 
-const SUBREDDITS_TR = ["Turkey", "TurkeyJerky", "kgbtr", "shitpostturkiye", "burdurland", "karamizah", "turkishfunny"];
+// Engellenecek flair metinleri (küçük harf, kısmi eşleşme)
+const BLOCKED_FLAIRS = ["konu dışı", "konu disi", "porçay", "porcay", "fan art", "fanart"];
 
-const IMAGE_EXTS = /\.(jpg|jpeg|png|gif|mp4)(\?.*)?$/i;
-
-// Imgur'dan subreddit galerisi çek
-async function fetchImgurSubreddit(sub, sort = "time", page = 0, attempt = 0) {
-  const url = `https://api.imgur.com/3/gallery/r/${sub}/${sort}/${page}`;
-  try {
-    const res = await fetch(url, {
-      headers: { Authorization: `Client-ID ${IMGUR_CLIENT_ID}` }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (!data.success || !data.data?.length) throw new Error("bos yanit");
-    return data.data;
-  } catch (e) {
-    if (attempt < 2) {
-      // Farkli sort ve page ile tekrar dene
-      const sorts = ["top", "viral", "time"];
-      const nextSort = sorts[(sorts.indexOf(sort) + 1) % sorts.length];
-      const nextPage = (page + 1) % 4;
-      await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
-      return fetchImgurSubreddit(sub, nextSort, nextPage, attempt + 1);
-    }
-    return [];
-  }
+function isBlockedFlair(flair) {
+  if (!flair) return false;
+  const f = flair.toLowerCase().trim();
+  return BLOCKED_FLAIRS.some(b => f.includes(b));
 }
 
-// Imgur post → gif objesi
-function imgurToGif(item) {
-  // Gallery album ise ilk resmi al
+// Reddit post → gif objesi
+function redditToGif(post) {
+  const p = post.data;
   let url = "";
   let preview = "";
   let isGif = false;
 
-  if (item.images && item.images.length > 0) {
-    // album
-    const img = item.images[0];
-    url = img.link || "";
-    isGif = img.animated || /\.gif$/i.test(url);
-    if (img.mp4 && img.animated) url = img.mp4; // mp4 gif yerine
-    preview = img.link || url;
-  } else {
-    // tekil resim/gif
-    url = item.link || "";
-    isGif = item.animated || /\.gif$/i.test(url);
-    if (item.mp4 && item.animated) url = item.mp4;
-    preview = item.link || url;
+  // Direkt resim/gif linki
+  if (p.url && IMAGE_EXTS.test(p.url)) {
+    url = p.url.replace(".gifv", ".gif");
+    isGif = /\.(gif|mp4)(\?|$)/i.test(url) || p.is_video;
+  }
+  // Reddit hosted video
+  else if (p.is_video && p.media?.reddit_video?.fallback_url) {
+    url = p.media.reddit_video.fallback_url;
+    isGif = true;
+  }
+  // i.redd.it
+  else if (p.url && p.url.includes("i.redd.it")) {
+    url = p.url;
+  }
+  // Reddit gallery — ilk resmi al
+  else if (p.is_gallery && p.media_metadata) {
+    const firstKey = p.gallery_data?.items?.[0]?.media_id;
+    if (firstKey && p.media_metadata[firstKey]) {
+      const m = p.media_metadata[firstKey];
+      url = `https://i.redd.it/${firstKey}.${m.m === "image/gif" ? "gif" : "jpg"}`;
+    }
   }
 
-  // .gifv → .gif
-  url = url.replace(".gifv", ".gif");
-  preview = preview.replace(".gifv", ".gif");
+  if (!url) return null;
 
-  // mp4 desteklenmiyorsa gif linkine dön
-  if (/\.mp4$/i.test(url) && item.gifv) {
-    url = item.gifv.replace(".gifv", ".gif");
-  }
+  // Preview resmi
+  preview = p.preview?.images?.[0]?.source?.url?.replace(/&amp;/g, "&") || url;
 
   return {
-    id: item.id || String(Math.random()),
-    title: item.title || "meme",
-    subreddit: item._sourceSub ? `r/${item._sourceSub}` : (item.subreddit ? `r/${item.subreddit}` : "r/memes"),
-    score: item.ups || item.score || 0,
+    id: p.id || String(Math.random()),
+    title: p.title || "meme",
+    subreddit: "r/burdurland",
+    flair: p.link_flair_text || "",
+    score: p.score || 0,
     isGif,
     images: {
       original: { url },
@@ -770,21 +755,45 @@ function imgurToGif(item) {
       fixed_height_still: { url: preview },
       fixed_height_small_still: { url: preview },
     },
-    redditUrl: item.reddit_comments_url
-      ? `https://reddit.com${item.reddit_comments_url}`
-      : `https://imgur.com/gallery/${item.id}`,
+    redditUrl: `https://reddit.com${p.permalink}`,
   };
 }
 
-function isValidImgurItem(item) {
-  if (item.is_album && (!item.images || item.images.length === 0)) return false;
-  const url = item.link || (item.images?.[0]?.link) || "";
-  if (!url) return false;
-  // Sadece resim/gif/mp4 — video embed yok
-  return IMAGE_EXTS.test(url) || item.animated || item.images?.[0]?.animated;
+function isValidRedditPost(post) {
+  const p = post.data;
+  if (!p || p.stickied || p.is_self) return false;
+  if (isBlockedFlair(p.link_flair_text)) return false;
+
+  const url = p.url || "";
+  const hasDirectImg = IMAGE_EXTS.test(url) || url.includes("i.redd.it");
+  const hasVideo = p.is_video && p.media?.reddit_video?.fallback_url;
+  const hasGallery = p.is_gallery && p.media_metadata && p.gallery_data?.items?.length > 0;
+
+  return hasDirectImg || hasVideo || hasGallery;
 }
 
-// Cache sistemi
+// Reddit JSON API'den çek
+async function fetchRedditBurdurland(sort = "hot", after = "", attempt = 0) {
+  const sorts = ["hot", "new", "top"];
+  const url = `https://www.reddit.com/r/burdurland/${sort}.json?limit=50&raw_json=1${after ? `&after=${after}` : ""}`;
+  try {
+    const res = await fetch(url, {
+      headers: { "Accept": "application/json" }
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data?.data?.children?.length) throw new Error("bos");
+    return { posts: data.data.children, after: data.data.after };
+  } catch (e) {
+    if (attempt < 2) {
+      const nextSort = sorts[(sorts.indexOf(sort) + 1) % sorts.length];
+      await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
+      return fetchRedditBurdurland(nextSort, "", attempt + 1);
+    }
+    return { posts: [], after: null };
+  }
+}
+
 let imgurCache = [], cacheTime = 0;
 const CACHE_TTL = 5 * 60 * 1000;
 
@@ -792,30 +801,38 @@ async function getPool(forceRefresh = false) {
   if (!forceRefresh && imgurCache.length > 20 && Date.now() - cacheTime < CACHE_TTL)
     return imgurCache;
 
-  const sorts = ["time", "viral", "top"];
-  const picks = [...SUBREDDITS_TR];
+  const sorts = ["hot", "new", "top"];
 
-  // Ilk deneme
-  let results = await Promise.all(
-    picks.map(sub => {
-      const sort = sorts[Math.floor(Math.random() * sorts.length)];
-      const page = Math.floor(Math.random() * 3);
-      return fetchImgurSubreddit(sub, sort, page)
-        .then(items => items.map(item => ({ ...item, _sourceSub: sub })));
-    })
+  // 3 farklı sort'tan paralel çek
+  const results = await Promise.all(
+    sorts.map(sort => fetchRedditBurdurland(sort))
   );
 
-  let flat = results.flat().filter(isValidImgurItem).map(imgurToGif);
+  let flat = results
+    .flatMap(r => r.posts)
+    .filter(isValidRedditPost)
+    .map(redditToGif)
+    .filter(Boolean);
 
-  // Bos geldiyse farkli parametrelerle tekrar dene
-  if (flat.length === 0) {
-    const retryResults = await Promise.all(
-      picks.map(sub =>
-        fetchImgurSubreddit(sub, "top", 0)
-          .then(items => items.map(item => ({ ...item, _sourceSub: sub })))
+  // Duplicate ID'leri temizle
+  const dedupSeen = new Set();
+  flat = flat.filter(g => { if (dedupSeen.has(g.id)) return false; dedupSeen.add(g.id); return true; });
+
+  // Hala az içerik varsa "top" ile farklı zaman dilimleri dene
+  if (flat.length < 10) {
+    const extras = await Promise.all(
+      ["week", "month", "all"].map(t =>
+        fetch(`https://www.reddit.com/r/burdurland/top.json?limit=50&t=${t}&raw_json=1`, {
+          headers: { "Accept": "application/json" }
+        }).then(r => r.json()).then(d => d?.data?.children || []).catch(() => [])
       )
     );
-    flat = retryResults.flat().filter(isValidImgurItem).map(imgurToGif);
+    const extraFlat = extras.flat()
+      .filter(isValidRedditPost)
+      .map(redditToGif)
+      .filter(Boolean)
+      .filter(g => !dedupSeen.has(g.id));
+    flat = [...flat, ...extraFlat];
   }
 
   if (flat.length === 0) throw new Error("Icerik yuklenemedi, lutfen tekrar deneyin.");
@@ -836,31 +853,32 @@ function markSeen(id) {
   sessionStorage.setItem("randeme_seen", JSON.stringify([...seenIds]));
 }
 function filterUnseen(list) {
-  const u = list.filter(g => !seenIds.has(g.id)); return u.length ? u : list;
+  return list.filter(g => !seenIds.has(g.id));
 }
 
 async function fetchRandomGif() {
-  const pool = filterUnseen(await getPool());
-  if (!pool.length) throw new Error("İçerik bulunamadı");
+  let pool = filterUnseen(await getPool());
+  // Havuz bittiyse yeni sayfa cek
+  if (pool.length === 0) {
+    pool = filterUnseen(await getPool(true));
+  }
+  // Hala bos ise seenIds'i sifirla (tum icerik goruldu)
+  if (pool.length === 0) {
+    seenIds.clear();
+    sessionStorage.removeItem("randeme_seen");
+    pool = await getPool(true);
+  }
+  if (!pool.length) throw new Error("Icerik bulunamadi");
   const gif = pool[Math.floor(Math.random() * pool.length)];
-  markSeen(gif.id); return gif;
+  markSeen(gif.id);
+  return gif;
 }
 
 async function fetchSearchGifs(query) {
-  // Imgur tag/subreddit arama
-  try {
-    const url = `https://api.imgur.com/3/gallery/search/time/0?q=${encodeURIComponent(query)}`;
-    const res = await fetch(url, { headers: { Authorization: `Client-ID ${IMGUR_CLIENT_ID}` } });
-    const data = await res.json();
-    if (data.success && data.data?.length) {
-      return data.data.filter(isValidImgurItem).map(imgurToGif);
-    }
-  } catch (_) {}
-  // Fallback: cache'den filtrele
+  // r/burdurland içinde başlık araması — cache'den filtrele
   const pool = await getPool();
   return pool.filter(g =>
-    g.title.toLowerCase().includes(query.toLowerCase()) ||
-    g.subreddit.toLowerCase().includes(query.toLowerCase())
+    g.title.toLowerCase().includes(query.toLowerCase())
   );
 }
 
